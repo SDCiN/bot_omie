@@ -4,3 +4,5 @@ auth.json
 __pycache__/
 *.pyc
 app/downloads/*.xlsx
+
+/.playwright-mcp

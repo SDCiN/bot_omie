@@ -42,16 +42,28 @@ def get_browser_context(playwright, headless: bool = True) -> tuple[Browser, Bro
     Returns:
         tuple: (Browser, BrowserContext)
     """
+    launch_args = []
+    if not headless:
+        # Firefox não tem flag de "iniciar maximizado"; define o tamanho da janela
+        launch_args = ["-width", "1920", "-height", "1080"]
+
     browser = playwright.firefox.launch(
         headless=headless,
-        slow_mo=100 if not headless else 0  # Slow down for visibility on first run
+        slow_mo=100 if not headless else 0,  # Slow down for visibility on first run
+        args=launch_args
     )
-    
+
     context_options = {
-        'viewport': {'width': 1366, 'height': 768},  # Standard HD resolution, no custom scaling
         'accept_downloads': True,
         'permissions': [],  # Block all permissions (notifications, geo, etc)
     }
+
+    if headless:
+        # Headless não tem janela real: mantém viewport fixo
+        context_options['viewport'] = {'width': 1920, 'height': 1080}
+    else:
+        # Sem viewport emulado: a página acompanha o tamanho real da janela
+        context_options['no_viewport'] = True
     
     # Load saved state if exists (works for both headless and visible browser)
     if auth_exists():
@@ -190,34 +202,53 @@ def realizar_login(page: Page) -> bool:
         
         # 1. Coloca Usuário
         logger.info("Preenchendo e-mail...")
-        
-        # User defined selector: getByRole('textbox', { name: 'Digite seu endereço de e-mail' })
-        # Using .first just in case, though get_by_role should be specific enough if unique
+
+        # Seletor: getByRole('textbox', { name: 'Digite seu endereço de e-mail' })
+        # (verificado ao vivo: é único; o id="email" é duplicado no DOM, não usar).
         email_input = page.get_by_role('textbox', name='Digite seu endereço de e-mail')
+        email_input.wait_for(state="visible", timeout=30000)
         email_input.fill(usuario)
-        
-        # 2. Clica no botão "Continuar"
-        logger.info("Clicando em 'Continuar'...")
-        # User defined selector: getByRole('button', { name: 'Continuar', exact: true })
-        page.get_by_role('button', name='Continuar', exact=True).click()
-        
-        # Aguarda transição para o campo de senha
-        page.wait_for_timeout(2000)
+
+        # 2. Avança o passo de e-mail.
+        # O clique em "Continuar" é frágil: após o fill o card sofre reflow e o
+        # reCAPTCHA Enterprise pode sobrepor o botão -> Locator.click trava em
+        # "visible/enabled/stable". E-mail e botão estão no mesmo <form
+        # id="form-search-omie">, então submetemos via ENTER (verificado ao vivo
+        # que avança o passo) e só caímos no clique/JS como fallback.
+        logger.info("Avançando passo de e-mail (Enter)...")
+        email_input.press("Enter")
+
+        senha_input = page.get_by_role('textbox', name='Digite aqui sua senha')
+        try:
+            senha_input.wait_for(state="visible", timeout=10000)
+        except Exception:
+            logger.warning("Enter não avançou para a senha. Tentando clicar em 'Continuar'...")
+            try:
+                page.get_by_role('button', name='Continuar', exact=True).click(timeout=15000)
+            except Exception:
+                logger.warning("Clique em 'Continuar' falhou. Forçando via JavaScript...")
+                page.evaluate("document.querySelector('#btn-continue')?.click()")
 
         # 3. Coloca Senha
         logger.info("Preenchendo senha...")
-        # User defined selector: getByRole('textbox', { name: 'Digite aqui sua senha' })
-        # Note: Ideally this would be a password field, but using user provided selector.
-        senha_input = page.get_by_role('textbox', name='Digite aqui sua senha')
-        senha_input.wait_for(state="visible", timeout=10000)
+        # Seletor: getByRole('textbox', { name: 'Digite aqui sua senha' })
+        senha_input.wait_for(state="visible", timeout=30000)
         senha_input.fill(senha)
-        
-        # 4. Clica no botão "Entrar"
-        logger.info("Clicando em 'Entrar'...")
-        # User defined selector: getByRole('button', { name: 'Entrar' })
-        entrar_btn = page.get_by_role('button', name='Entrar')
-        entrar_btn.click()
-        
+
+        # 4. Submete o login (Enter, com fallback para o botão "Entrar")
+        logger.info("Submetendo login...")
+        senha_input.press("Enter")
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        if not verificar_login(page, timeout=5000):
+            logger.warning("Login não confirmado após Enter. Tentando botão 'Entrar'...")
+            try:
+                page.get_by_role('button', name='Entrar').click(timeout=15000)
+            except Exception as e:
+                logger.warning(f"Clique em 'Entrar' falhou: {e}")
+
         # Aguarda login
         logger.info("Aguardando confirmação de login...")
         page.wait_for_load_state("networkidle", timeout=30000)

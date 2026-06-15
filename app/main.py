@@ -15,6 +15,7 @@ import os
 import sys
 import time
 import logging
+from datetime import datetime
 from playwright.sync_api import sync_playwright, Page, Download
 from dotenv import load_dotenv
 
@@ -75,6 +76,17 @@ RELATORIOS = [
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds between retries
 REPORT_EXECUTION_TIMEOUT = 300  # 5 minutes max wait for report execution
+
+
+def salvar_screenshot_debug(page: Page, etapa: str):
+    """Salva um screenshot da página para diagnóstico de falhas de automação."""
+    try:
+        nome = f"debug_{etapa}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        caminho = os.path.join(DOWNLOADS_DIR, nome)
+        page.screenshot(path=caminho)
+        logger.info(f"📸 Screenshot de debug salvo em: {caminho}")
+    except Exception as e:
+        logger.warning(f"Não foi possível salvar screenshot de debug: {e}")
 
 
 def fechar_popups(page: Page):
@@ -302,6 +314,7 @@ def navegar_para_financas(page: Page) -> tuple[bool, Page]:
             time.sleep(3)
         except Exception as e:
             logger.error(f"Erro ao passar mouse em 'paid': {e}")
+            salvar_screenshot_debug(page, "hover_paid_navegacao")
             return False, page
         
         logger.info("✅ Navegação para Finanças concluída")
@@ -427,29 +440,43 @@ def extrair_relatorio_omie(page: Page, nome_menu: str, data_slug: str, nome_arqu
     """
     try:
         logger.info(f"Extraindo relatório: {nome_menu}")
-        
+
+        # Use CSS selector with data-slug attribute (unique identifier)
+        selector = f'[data-slug="{data_slug}"]'
+        report_element = page.locator(selector)
+
         # IMPORTANT: Hover over 'paid' first to reveal the menu
         logger.info("Revelando menu de relatórios...")
         try:
-            page.get_by_role("link", name="paid").hover()
-            time.sleep(2)
+            # O hover da navegação inicial pode ter deixado o menu aberto;
+            # nesse estado o link 'paid' fica oculto e o hover falharia.
+            if report_element.is_visible():
+                logger.info("Menu de relatórios já está aberto.")
+            else:
+                fechar_popups(page)
+                try:
+                    page.get_by_role("link", name="paid").hover(timeout=15000)
+                except Exception:
+                    # Fallback: aciona o módulo Finanças direto pelo data-id
+                    logger.warning("Hover em 'paid' falhou. Acionando módulo FIN diretamente...")
+                    page.locator('a[data-id="FIN"]').first.click(timeout=15000, force=True)
+                time.sleep(2)
             logger.info("✅ Menu revelado")
         except Exception as e:
             logger.error(f"Erro ao revelar menu: {e}")
+            salvar_screenshot_debug(page, "revelar_menu")
             return None
-        
+
         # Phase 1: Click on report using unique data-slug
         logger.info(f"Selecionando relatório usando data-slug...")
         try:
-            # Use CSS selector with data-slug attribute (unique identifier)
-            selector = f'[data-slug="{data_slug}"]'
-            report_element = page.locator(selector)
             report_element.wait_for(state="visible", timeout=60000)
             report_element.click()
             logger.info(f"✅ Relatório clicado")
         except Exception as e:
             logger.error(f"❌ Erro ao clicar no relatório: {e}")
             logger.error(f"Data-slug: '{data_slug}'")
+            salvar_screenshot_debug(page, "clicar_relatorio")
             return None
         
         time.sleep(3)
@@ -470,8 +497,15 @@ def extrair_relatorio_omie(page: Page, nome_menu: str, data_slug: str, nome_arqu
         time.sleep(5)
         
         # Phase 4: Hover over "Exportar" menu item
+        # O relatório pode demorar mais que a espera fixa de 5 minutos: o item
+        # 'Exportar' existe no DOM mas fica oculto até a execução terminar.
+        # Aguarda ele ficar visível por até 5 minutos extras antes do hover.
+        fechar_popups(page)
+        logger.info("Aguardando menu 'Exportar' ficar visível...")
+        exportar_item = page.get_by_role("menuitem", name="Exportar")
+        exportar_item.wait_for(state="visible", timeout=300000)
         logger.info("Passando mouse sobre 'Exportar'...")
-        page.get_by_role("menuitem", name="Exportar").hover()
+        exportar_item.hover()
         time.sleep(1)
         
         # Phase 5: Click "Excel" format and wait for download
@@ -512,6 +546,7 @@ def extrair_relatorio_omie(page: Page, nome_menu: str, data_slug: str, nome_arqu
         
     except Exception as e:
         logger.error(f"❌ Erro ao extrair relatório '{nome_menu}': {e}")
+        salvar_screenshot_debug(page, "extrair_relatorio")
         return None
 
 
